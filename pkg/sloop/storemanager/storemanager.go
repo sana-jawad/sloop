@@ -9,13 +9,16 @@ package storemanager
 
 import (
 	"fmt"
+	"github.com/dgraph-io/badger/v2"
 	"github.com/golang/glog"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/salesforce/sloop/pkg/sloop/common"
 	"github.com/salesforce/sloop/pkg/sloop/store/typed"
 	"github.com/salesforce/sloop/pkg/sloop/store/untyped"
+	"github.com/salesforce/sloop/pkg/sloop/store/untyped/badgerwrap"
 	"github.com/spf13/afero"
+	"math"
 	"sync"
 	"time"
 )
@@ -170,6 +173,7 @@ func (sm *StoreManager) refreshStats() *storeStats {
 }
 
 func doCleanup(tables typed.Tables, timeLimit time.Duration, sizeLimitBytes int, stats *storeStats, deletionBatchSize int) (bool, float64, float64, error) {
+
 	ok, minPartition, maxPartition, err := tables.GetMinAndMaxPartition()
 	if err != nil {
 		return false, 0, 0, fmt.Errorf("failed to get min partition : %s, max partition: %s, err:%v", minPartition, maxPartition, err)
@@ -191,23 +195,42 @@ func doCleanup(tables typed.Tables, timeLimit time.Duration, sizeLimitBytes int,
 	var totalNumOfDeletedKeys float64 = 0
 	var totalNumOfKeysToDelete float64 = 0
 	anyCleanupPerformed := false
-	if cleanUpTimeCondition(minPartition, maxPartition, timeLimit) || cleanUpFileSizeCondition(stats, sizeLimitBytes) {
+	minPartitionStartTime, err := untyped.GetTimeForPartition(minPartition)
+	if err != nil {
+		return false, 0, 0, err
+	}
+
+	numOfKeysToDelete := cleanUpFileSizeCondition(stats, sizeLimitBytes, tables.Db())
+	for cleanUpTimeCondition(minPartition, maxPartition, timeLimit) || totalNumOfDeletedKeys < numOfKeysToDelete {
 		partStart, partEnd, err := untyped.GetTimeRangeForPartition(minPartition)
 		glog.Infof("GC removing partition %q with data from %v to %v (err %v)", minPartition, partStart, partEnd, err)
 		var errMessages []string
 		for _, tableName := range tables.GetTableNames() {
 			prefix := fmt.Sprintf("/%s/%s", tableName, minPartition)
 			start := time.Now()
-			err, numOfDeletedKeys, numOfKeysToDelete := untyped.DeleteKeysWithPrefix([]byte(prefix), tables.Db(), deletionBatchSize)
-			metricGcDeletedNumberOfKeysByTable.WithLabelValues(fmt.Sprintf("%v", tableName)).Set(numOfDeletedKeys)
-			totalNumOfDeletedKeys += numOfDeletedKeys
-			totalNumOfKeysToDelete += numOfKeysToDelete
+			err, numOfDeletedKeysforPrefix, numOfKeysToDeleteForPrefix := untyped.DeleteKeysWithPrefix([]byte(prefix), tables.Db(), deletionBatchSize)
+			metricGcDeletedNumberOfKeysByTable.WithLabelValues(fmt.Sprintf("%v", tableName)).Set(numOfDeletedKeysforPrefix)
+			totalNumOfDeletedKeys += numOfDeletedKeysforPrefix
+			totalNumOfKeysToDelete += numOfKeysToDeleteForPrefix
 			elapsed := time.Since(start)
-			glog.Infof("Call to DeleteKeysWithPrefix(%v) took %v and removed %f keys with error: %v", prefix, elapsed, numOfDeletedKeys, err)
+			glog.Infof("Call to DeleteKeysWithPrefix(%v) took %v and removed %f keys with error: %v", prefix, elapsed, numOfDeletedKeysforPrefix, err)
 			if err != nil {
 				errMessages = append(errMessages, fmt.Sprintf("failed to cleanup with min key: %s, elapsed: %v,err: %v,", prefix, elapsed, err))
 			}
 			anyCleanupPerformed = true
+
+		}
+
+		minPartitionStartTime = minPartitionStartTime.Add(1 * untyped.GetPartitionDuration())
+		minPartition = untyped.GetPartitionId(minPartitionStartTime)
+
+		minPartitionAge, err := untyped.GetAgeOfPartitionInHours(minPartition)
+		if err == nil {
+			metricAgeOfMinimumPartition.Set(minPartitionAge)
+		}
+
+		if minPartitionAge < 0 {
+			return false, totalNumOfDeletedKeys, totalNumOfKeysToDelete, fmt.Errorf("minimun partition age cannot be less than zero")
 		}
 
 		if len(errMessages) != 0 {
@@ -219,6 +242,11 @@ func doCleanup(tables typed.Tables, timeLimit time.Duration, sizeLimitBytes int,
 		}
 	}
 
+
+
+	lsm, vlog := tables.Db().Size()
+	glog.Infof("LSM size: %v exceeds file size: %v", lsm, vlog)
+	tables.Db().DropPrefix([]byte{})
 	return anyCleanupPerformed, totalNumOfDeletedKeys, totalNumOfKeysToDelete, nil
 }
 
@@ -244,11 +272,35 @@ func cleanUpTimeCondition(minPartition string, maxPartition string, timeLimit ti
 	return false
 }
 
-func cleanUpFileSizeCondition(stats *storeStats, sizeLimitBytes int) bool {
-	if stats.DiskSizeBytes > int64(sizeLimitBytes) {
+func cleanUpFileSizeCondition(stats *storeStats, sizeLimitBytes int, db badgerwrap.DB) float64 {
+
+	lsm, vlog := db.Size()
+	glog.Infof("LSM size: %v exceeds file size: %v", lsm, vlog)
+	sizeLimit := 0.8 * float64(sizeLimitBytes)
+	diskSize := float64(stats.DiskSizeBytes)
+	if diskSize > sizeLimit {
 		glog.Infof("Start cleaning up because current file size: %v exceeds file size: %v", stats.DiskSizeBytes, sizeLimitBytes)
-		return true
+		totalKeyCount := float64(getTotalKeyCount(db))
+		keysToDelete := (diskSize - sizeLimit) * (totalKeyCount) / diskSize
+		return math.Ceil(keysToDelete)
 	}
 	glog.V(2).Infof("Can not clean up, disk size: %v is not exceeding size limit: %v yet", stats.DiskSizeBytes, uint64(sizeLimitBytes))
-	return false
+	return 0
+}
+
+func getTotalKeyCount(db badgerwrap.DB) uint64 {
+	var totalKeyCount uint64 = 0
+	_ = db.View(func(txn badgerwrap.Txn) error {
+		iterOpt := badger.DefaultIteratorOptions
+		iterOpt.AllVersions = false
+		iterOpt.PrefetchValues = false
+		it := txn.NewIterator(iterOpt)
+		defer it.Close()
+
+		for it.Rewind(); it.Valid(); it.Next() {
+			totalKeyCount++
+		}
+		return nil
+	})
+	return totalKeyCount
 }

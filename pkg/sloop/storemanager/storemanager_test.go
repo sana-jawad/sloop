@@ -37,8 +37,9 @@ func Test_cleanUpFileSizeCondition_True(t *testing.T) {
 		DiskSizeBytes: 10,
 	}
 
-	flag := cleanUpFileSizeCondition(stats, 3)
-	assert.True(t, flag)
+	db := help_get_db(t)
+	keysToDelete := cleanUpFileSizeCondition(stats, 3, db)
+	assert.Equal(t, 4.0, keysToDelete)
 }
 
 func Test_cleanUpFileSizeCondition_False(t *testing.T) {
@@ -46,8 +47,9 @@ func Test_cleanUpFileSizeCondition_False(t *testing.T) {
 		DiskSizeBytes: 10,
 	}
 
-	flag := cleanUpFileSizeCondition(stats, 100)
-	assert.False(t, flag)
+	db := help_get_db(t)
+	keysToDelete := cleanUpFileSizeCondition(stats, 100, db)
+	assert.Equal(t, 0.0, keysToDelete)
 }
 
 func Test_cleanUpTimeCondition(t *testing.T) {
