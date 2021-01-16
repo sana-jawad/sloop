@@ -75,6 +75,16 @@ function populateDropdownFromQuery(param, elementId, defaultValue, queryUrl) {
     return value
 }
 
+function getWindowLocationPathName()
+{
+    var windowLocation = window.location.pathname.toString()
+    if (windowLocation.endsWith("/")) {
+        return windowLocation.substr(0, windowLocation.length - 1)
+    }
+
+    return windowLocation
+}
+
 function setFiltersAndReturnQueryUrl(defaultLookback, defaultKind, defaultNamespace) {
     // Keep this in sync with pkg/sloop/queries/params.go
 
@@ -89,11 +99,13 @@ function setFiltersAndReturnQueryUrl(defaultLookback, defaultKind, defaultNamesp
 
     namematch = setText("namematch", "filternamematch", "")
 
-    query =           populateDropdownFromQuery("query",     "filterquery",     "EventHeatMap",  "/data?query=Queries&lookback="+lookback);
-    ns =              populateDropdownFromQuery("namespace", "filternamespace", defaultNamespace, "/data?query=Namespaces&lookback="+lookback);
-    kind =            populateDropdownFromQuery("kind",      "filterkind",      defaultKind,      "/data?query=Kinds&lookback="+lookback);
+    windowLocation = getWindowLocationPathName()
 
-    dataQuery = "/data?query="+query+"&namespace="+ns+"&lookback="+lookback+"&kind="+kind+"&sort="+sort+"&namematch="+namematch
+    query =           populateDropdownFromQuery("query",     "filterquery",     "EventHeatMap",  windowLocation+"/data?query=Queries&lookback="+lookback);
+    ns =              populateDropdownFromQuery("namespace", "filternamespace", defaultNamespace, windowLocation+"/data?query=Namespaces&lookback="+lookback);
+    kind =            populateDropdownFromQuery("kind",      "filterkind",      defaultKind,      windowLocation+"/data?query=Kinds&lookback="+lookback);
+
+    dataQuery = windowLocation+"/data?query="+query+"&namespace="+ns+"&lookback="+lookback+"&kind="+kind+"&sort="+sort+"&namematch="+namematch
     return dataQuery
 }
 
