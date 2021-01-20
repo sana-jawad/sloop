@@ -105,6 +105,7 @@ func webFileHandler(currentContext string) http.HandlerFunc {
 			logWebError(err, "Error reading web file: "+fixedUrl, r, w)
 			return
 		}
+		
 		w.Header().Set("content-type", mime.TypeByExtension(filepath.Ext(fullPath)))
 		_, err = w.Write(data)
 		if err != nil {
@@ -151,7 +152,6 @@ func backupHandler(db badgerwrap.DB, currentContext string) http.HandlerFunc {
 
 func queryHandler(tables typed.Tables, maxLookBack time.Duration) http.HandlerFunc {
 	return func(writer http.ResponseWriter, request *http.Request) {
-		glog.Infof("Reached in queryHandler ************** %s", request.URL.Query())
 		writer.Header().Set("content-type", "application/json")
 
 		queryName := request.URL.Query().Get(queries.QueryParam)
@@ -175,7 +175,7 @@ func healthHandler() http.HandlerFunc {
 func redirectHandler(currentContext string) http.HandlerFunc {
 	return func(writer http.ResponseWriter, request *http.Request) {
 		redirectURL := "/"+currentContext
-		http.Redirect(writer, request, redirectURL, http.StatusMovedPermanently)
+		http.Redirect(writer, request, redirectURL, http.StatusTemporaryRedirect)
 	}
 }
 
